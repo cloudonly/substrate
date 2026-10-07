@@ -30,9 +30,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - variant: baseline
+        - variant: fixed-slow
           dataplane: agentgateway
-          ref: 0b91488d79637052458a29a6ba6c757bcf7a9292
+          ref: 8ae90df09985114db20e5e789392f9cd15d7bf59
+          inject_delay: true
+        - variant: fixed-normal
+          dataplane: agentgateway
+          ref: 8ae90df09985114db20e5e789392f9cd15d7bf59
+          inject_delay: false
     env:
       E2E_ATENET_DATAPLANE: ${{ matrix.dataplane }}
       # The installer requires a credential provider selection, and deploys the
@@ -55,6 +60,7 @@ jobs:
       with:
         ref: ${{ matrix.ref }}
     - name: Inject slow combined-volume restore
+      if: matrix.inject_delay
       run: |
         python3 - <<'PY'
         from pathlib import Path
@@ -179,13 +185,13 @@ jobs:
     - name: Save Go build cache
       # Main only, so PRs restore the latest main build rather than each
       # storing its own copy.
-      if: ${{ !cancelled() && github.ref == 'refs/heads/main' && matrix.dataplane == 'envoy' }}
+      if: ${{ always() && !cancelled() }}
       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: |
           ~/.cache/go-build
           ~/go/pkg/mod
-        key: e2e-go-${{ runner.os }}-${{ github.sha }}
+        key: e2e-go-${{ runner.os }}-${{ matrix.variant }}-${{ github.sha }}
     - name: Upload test results
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
