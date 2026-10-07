@@ -1,0 +1,110 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Validate combined-volume resume fix
+on:
+  push:
+    branches: [diagnose/verify-combined-volume-resume-20261007]
+permissions:
+  contents: read
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    # A bound well clear of the observed runtime. Without one the platform
+    # default applies, and a wedged step burns a free-tier slot for six hours.
+    timeout-minutes: 45
+    env:
+      # Where each runner writes its JUnit. Every invocation needs its own file;
+      # a shared path means the last writer wins.
+      ARTIFACTS: ${{ github.workspace }}/_artifacts
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        fetch-depth: 0
+        ref: 8ae90df09985114db20e5e789392f9cd15d7bf59
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      with:
+        go-version-file: 'go.mod'
+    # Unconditional: a released migration becoming permanent is exactly what
+    # this guards, and that happens on the push to main, not on the PR.
+    - name: Verify immutable PostgreSQL migrations
+      run: hack/verify/postgresql-migrations.sh
+    # we only test on amd64, make sure everything still builds for arm64
+    - name: build for arm64
+      run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+    # gotestsum wraps go test to emit JUnit; the go test arguments are unchanged.
+    - name: unit tests
+      run: hack/run-tool.sh gotestsum --junitfile "${ARTIFACTS}/unit.xml"
+        --jsonfile "${ARTIFACTS}/unit.json" --format standard-verbose
+        -- -race -v ./...
+    # tools/apitool has its own module so we need to run it explicitly.
+    # run-tool.sh resolves the repo root itself, so it works from the subdir.
+    - name: apitool tests
+      working-directory: tools/apitool
+      run: ../../hack/run-tool.sh gotestsum --junitfile "${ARTIFACTS}/apitool.xml"
+        --jsonfile "${ARTIFACTS}/apitool.json" --format standard-verbose
+        -- -race -v ./...
+    # Kept apart from the root module so it can move to its own repository.
+    - name: gcp-secret-manager credential provider tests
+      working-directory: internal/plugins/gcp-secret-manager
+      run: ../../../hack/run-tool.sh gotestsum --junitfile "${ARTIFACTS}/gcp-secret-manager.xml"
+        --jsonfile "${ARTIFACTS}/gcp-secret-manager.json" --format standard-verbose
+        -- -race -v ./...
+    # The root verifiers stop at the module's go.mod, so it gets its own run:
+    # gofmt, go vet and the tidy check, then golangci-lint with the root config.
+    - name: gcp-secret-manager credential provider verify
+      working-directory: internal/plugins/gcp-secret-manager
+      run: |
+        make verify
+        ../../../hack/run-tool.sh golangci-lint run --config ../../../.golangci.yaml ./...
+    - name: Cache cargo
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          cmd/dataplane/envoy/dynamic-modules/*/target
+        key: cargo-${{ runner.os }}-${{ hashFiles('cmd/dataplane/envoy/dynamic-modules/*/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-
+    - name: dynamic module tests
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends clang libclang-dev
+        make test-dynamic-modules
+    # Root-gated tests (overlay mounts, whiteout mknod, trusted.* xattrs, ...)
+    # skip for the unprivileged runner user above; rerun the packages that
+    # contain them (any test importing internal/roottest) under sudo.
+    - name: root-gated tests
+      env:
+        ROOT_JUNIT_FILE: ${{ github.workspace }}/_artifacts/root.xml
+      run: hack/run-root-tests.sh -race -v
+    # An exit code cannot distinguish "all passed" from "none ran". A registered
+    # file that was never written fails too.
+    - name: Require tests to have run
+      if: always()
+      run: |
+        make build-junittool
+        bin/junittool verify -manifest "${ARTIFACTS}/expected-junit.txt"
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: test-results-unit
+        path: ${{ env.ARTIFACTS }}
+        if-no-files-found: error
+    - name: verify
+      run: hack/verify-all.sh
