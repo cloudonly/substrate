@@ -992,37 +992,6 @@ func TestSuspendActor_Finalized_ReleasesOnlyOwnWorker(t *testing.T) {
 	}
 }
 
-// TestPreferredFidelity verifies golden actors always commit Full — new
-// actors resume the golden snapshot Full, so the template's preferredFidelity must not
-// thin it down to a data-only capture.
-func TestPreferredFidelity(t *testing.T) {
-	tmpl := func(fidelity ateapipb.SnapshotFidelity) *ateapipb.ActorTemplate {
-		return &ateapipb.ActorTemplate{
-			SnapshotConfig: &ateapipb.SnapshotConfig{PreferredFidelity: fidelity},
-		}
-	}
-	fullScope := ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
-	dataScope := ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
-	tests := []struct {
-		name     string
-		atespace string
-		fidelity ateapipb.SnapshotFidelity
-		want     ateapipb.SnapshotFidelity
-	}{
-		{"golden actor ignores Data fidelity", resources.GoldenActorAtespace, dataScope, fullScope},
-		{"golden actor keeps Full fidelity", resources.GoldenActorAtespace, fullScope, fullScope},
-		{"regular actor uses Data fidelity", "team-a", dataScope, dataScope},
-		{"regular actor uses Full fidelity", "team-a", fullScope, fullScope},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := preferredFidelity(tc.atespace, tmpl(tc.fidelity)); got != tc.want {
-				t.Errorf("preferredFidelity(%q, fidelity=%s) = %s, want %s", tc.atespace, tc.fidelity, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestIsPausedOriginSuspend pins the paused-origin discriminator: a local
 // snapshot alone must not select the paused path, because a RUNNING actor
 // resumed from pause still carries one; only the paused shape (SUSPENDED with
@@ -1410,15 +1379,6 @@ func TestSuspendAndPause_CharacteristicMatrix(t *testing.T) {
 			status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_DELETING},
 			sync:   rejected(suspendOutcome{state: ateapipb.ActorState_ACTOR_STATE_DELETING}),
 			async:  rejected(suspendOutcome{state: ateapipb.ActorState_ACTOR_STATE_DELETING}),
-		},
-		{
-			// A golden actor commits MEMORY whatever the template prefers, and
-			// cannot be paused at all.
-			name:     "golden RUNNING",
-			atespace: resources.GoldenActorAtespace,
-			status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, AssignedNode: node, WorkerAssignment: wireTestAssignment()},
-			sync:     suspendOutcome{code: codes.OK, atelet: ateletCall{checkpoints: 1, fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, uploadMode: immediate, object: true}, state: suspended, generation: 1, snapshots: []snapshotOutcome{{1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", completed}}},
-			async:    rejected(suspendOutcome{state: ateapipb.ActorState_ACTOR_STATE_RUNNING, assignedNode: node, workerHeld: true}),
 		},
 	}
 

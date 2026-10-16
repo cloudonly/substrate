@@ -203,11 +203,6 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 		}
 		return nil, apierror.FailedPrecondition("MarkSuspending prerequisite not met for Actor: %s (got: %v, want %s or %s with a node-local snapshot)", actorRef, state, ateapipb.ActorState_ACTOR_STATE_RUNNING, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
 	}
-	// Golden actors are only suspended, never paused.
-	// TODO: Remove this check: the suspend workflow should not special-case golden actors.
-	if mode == suspendAsync && actorRef.Atespace == resources.GoldenActorAtespace {
-		return nil, apierror.FailedPrecondition("actors in atespace %q are golden actors, which cannot be paused", actorRef.Atespace)
-	}
 	// A paused actor's durable snapshot is an upload of its local checkpoint,
 	// so it keeps that checkpoint's name; a running actor's is a new one.
 	var snapshotName string
@@ -237,7 +232,7 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 				return nil
 			}
 			snap.ActorTemplateUid = actorTemplate.GetMetadata().GetUid()
-			snap.Fidelity = preferredFidelity(actorRef.Atespace, actorTemplate)
+			snap.Fidelity = actorTemplate.GetSnapshotConfig().GetPreferredFidelity()
 			snap.DurableSnapshot = &ateapipb.SnapshotStorage{
 				Status: ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING,
 				Object: &ateapipb.ObjectSnapshot{SnapshotUri: uri.String()},
@@ -250,7 +245,7 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 		gen := toUpdate.Status.LastAssignedGeneration + 1
 		toUpdate.Status.LastAssignedGeneration = gen
 
-		fidelity := preferredFidelity(actorRef.Atespace, actorTemplate)
+		fidelity := actorTemplate.GetSnapshotConfig().GetPreferredFidelity()
 		templateUID := actorTemplate.GetMetadata().GetUid()
 		snap := newLocalSnapshot(gen, fidelity, templateUID, snapshotName, "")
 		if mode == suspendSync {
@@ -276,17 +271,6 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 	}
 	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
 	return storedActor, nil
-}
-
-// preferredFidelity returns the fidelity a suspend snapshot is taken with.
-// Golden actors always commit MEMORY regardless of the template's
-// preferredFidelity: new actors borrow the golden snapshot and resume it
-// with memory, so it must carry the guest memory and filesystem.
-func preferredFidelity(atespace string, tmpl *ateapipb.ActorTemplate) ateapipb.SnapshotFidelity {
-	if atespace == resources.GoldenActorAtespace {
-		return ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
-	}
-	return tmpl.GetSnapshotConfig().GetPreferredFidelity()
 }
 
 // TODO(paused-suspend): remove with the paused -> suspended transition.
@@ -343,7 +327,7 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	// actor is currently running (recorded on-node at Run/Restore) and pins it
 	// into the snapshot manifest.
 	inProgressSnap := snapshotAtLatestGeneration(actor.GetStatus())
-	fidelity := fidelityToAtelet(preferredFidelity(actor.GetMetadata().GetAtespace(), actorTemplate))
+	fidelity := fidelityToAtelet(actorTemplate.GetSnapshotConfig().GetPreferredFidelity())
 	// A sync suspend records its URI on the in-progress durable snapshot;
 	// an async one has no durable snapshot record yet, so derive the URI
 	// from the persisted snapshot UUID.
@@ -421,7 +405,7 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 	client := ateletpb.NewAteletClient(ateletConn)
 
 	// The template's preferred fidelity, as a running-origin suspend commits.
-	fidelity := fidelityToAtelet(preferredFidelity(actor.GetMetadata().GetAtespace(), actorTemplate))
+	fidelity := fidelityToAtelet(actorTemplate.GetSnapshotConfig().GetPreferredFidelity())
 	req := &ateletpb.PromoteSnapshotRequest{
 		Atespace:              actor.GetMetadata().GetAtespace(),
 		ActorName:             actor.GetMetadata().GetName(),
